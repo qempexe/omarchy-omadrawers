@@ -37,7 +37,23 @@ Item {
         var s = root.effectiveSettings || ({})
         return s.glyph ? String(s.glyph) : "\uf141"
     }
+    // Which bar section this drawer lives in ("" if it can't be worked out).
+    readonly property string sectionName: {
+        var cfg = root.bar && root.bar.layoutConfig ? root.bar.layoutConfig : null
+        if (!cfg || root.drawerKey === "") return ""
+        var layout = cfg.layout ? cfg.layout : cfg
+        var names = ["left", "center", "right"]
+        for (var n = 0; n < names.length; n++) {
+            var arr = layout[names[n]]
+            if (!arr || arr.length === undefined) continue
+            for (var i = 0; i < arr.length; i++)
+                if (arr[i] && String(arr[i].key || "") === root.drawerKey) return names[n]
+        }
+        return ""
+    }
+    // Right section opens toward the left; left and center open toward the right.
     readonly property bool before: {
+        if (root.sectionName !== "") return root.sectionName === "right"
         var s = root.effectiveSettings || ({})
         return s.reveal === "before"
     }
@@ -51,6 +67,7 @@ Item {
     readonly property real drawerPad: 4
 
     property bool pinned: false
+    property bool pinnedAtPress: false
     property bool shown: false
     // Suppress hover-open while any drawer is being dragged so its overlay
     // can't interfere with the shell's drag hit-test.
@@ -170,15 +187,17 @@ Item {
         }
     }
 
-    implicitWidth: root.vertical ? root.barSize : handle.width
-    implicitHeight: root.vertical ? handle.height : root.barSize
+    // The drawer is part of this widget's own size, so when it opens the bar
+    // layout shifts neighbouring widgets out of the way (and back again).
+    implicitWidth: root.vertical ? root.barSize : handle.width + clipBox.width
+    implicitHeight: root.vertical ? handle.height + clipBox.height : root.barSize
 
     z: (root.shown || root.pinned) ? 100 : 0
 
     Item {
         id: handle
-        x: 0
-        y: 0
+        x: (!root.vertical && root.before) ? clipBox.width : 0
+        y: (root.vertical && root.before) ? clipBox.height : 0
         width: root.vertical ? root.barSize : glyphText.implicitWidth + root.pad * 2
         height: root.vertical ? glyphText.implicitHeight + root.pad * 2 : root.barSize
 
@@ -203,6 +222,7 @@ Item {
 
             onPressed: function(mouse) {
                 if (mouse.button !== Qt.LeftButton) return
+                root.pinnedAtPress = root.pinned
                 root.pinned = false
                 root.shown = false
                 root.dragging = true
@@ -224,7 +244,8 @@ Item {
                     root.tip(false)
                     root.toggle()
                 } else {
-                    root.pinned = !root.pinned
+                    root.pinned = !root.pinnedAtPress
+                    root.shown = true
                 }
             }
         }
@@ -239,22 +260,12 @@ Item {
         opacity: root.shown ? 1 : 0
         width: root.vertical ? root.barSize : (root.shown ? content.width + drawerPad * 2 : 0)
         height: root.vertical ? (root.shown ? content.height + drawerPad * 2 : 0) : root.barSize
-        x: root.vertical
-            ? 0
-            : (root.before ? -(content.width + drawerPad * 2) : handle.width)
-        y: root.vertical
-            ? (root.before ? -(content.height + drawerPad * 2) : handle.height)
-            : 0
+        x: root.vertical ? 0 : (root.before ? 0 : handle.width)
+        y: root.vertical ? (root.before ? 0 : handle.height) : 0
 
         Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
         Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
         Behavior on opacity { NumberAnimation { duration: 140 } }
-
-        Rectangle {
-            anchors.fill: parent
-            color: root.drawerBackground
-            radius: Style && Style.radius ? Style.radius : 4
-        }
 
         Grid {
             id: content
@@ -262,8 +273,8 @@ Item {
             spacing: root.gap
             verticalItemAlignment: Grid.AlignVCenter
             horizontalItemAlignment: Grid.AlignHCenter
-            x: root.drawerPad
-            y: root.drawerPad
+            x: root.vertical ? (clipBox.width - width) / 2 : root.drawerPad
+            y: root.vertical ? root.drawerPad : (clipBox.height - height) / 2
 
             Repeater {
                 model: root.items

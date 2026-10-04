@@ -23,16 +23,51 @@ PluginBarApi {
     clickTargets: source && source.clickTargets ? source.clickTargets : []
     layoutConfig: source && source.layoutConfig ? source.layoutConfig : ({})
 
+    // Everything a hosted widget registers with the real bar is remembered here,
+    // so releaseAll() can hand it back before the widget is destroyed. Otherwise
+    // the bar keeps pointers to dead items (click targets / tooltip owners).
+    property var _clickTargets: []
+    property var _tipTargets: []
+
+    function _forget(list, target) {
+        var i = list.indexOf(target)
+        if (i >= 0) list.splice(i, 1)
+    }
+
+    function releaseAll() {
+        var clicks = root._clickTargets.slice()
+        var tips = root._tipTargets.slice()
+        root._clickTargets = []
+        root._tipTargets = []
+        for (var i = 0; i < tips.length; i++) {
+            try {
+                if (tips[i] && source && typeof source.hideTooltip === "function") source.hideTooltip(tips[i])
+            } catch (e) { }
+        }
+        for (var j = 0; j < clicks.length; j++) {
+            try {
+                if (clicks[j] && source && typeof source.unregisterClickTarget === "function")
+                    source.unregisterClickTarget(clicks[j])
+            } catch (e) { }
+        }
+    }
+
+    Component.onDestruction: root.releaseAll()
+
     _showTooltip: function(target, text) {
+        if (target && root._tipTargets.indexOf(target) < 0) root._tipTargets.push(target)
         if (source && typeof source.showTooltip === "function") source.showTooltip(target, text)
     }
     _hideTooltip: function(target) {
+        root._forget(root._tipTargets, target)
         if (source && typeof source.hideTooltip === "function") source.hideTooltip(target)
     }
     _registerClickTarget: function(target) {
+        if (target && root._clickTargets.indexOf(target) < 0) root._clickTargets.push(target)
         if (source && typeof source.registerClickTarget === "function") source.registerClickTarget(target)
     }
     _unregisterClickTarget: function(target) {
+        root._forget(root._clickTargets, target)
         if (source && typeof source.unregisterClickTarget === "function") source.unregisterClickTarget(target)
     }
     _requestPopout: function(owner) {

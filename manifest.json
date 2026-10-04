@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.qempexe.omadrawers",
   "name": "Omadrawers",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "qempexe",
   "license": "MIT",
   "description": "Hover drawers for the Omarchy bar: right-click the icon to name it, pick an icon and choose which bar widgets hide inside. Unlimited drawers. Please read the github README.md first!",

@@ -366,7 +366,8 @@ cmd_add() { # [--section S] [--after KEY]: put a new blank drawer on the bar (ri
   [[ $section =~ ^(left|center|right)$ ]] || die "section must be left, center or right"
   local key entry
   key=$(next_key "drawer")
-  entry=$(jq -nc --arg id "$ID" --arg key "$key" '{id: $id, key: $key, name: "Drawer", glyph: "\uf141", items: []}')
+  local reveal=after; [[ $section == right ]] && reveal=before
+  entry=$(jq -nc --arg id "$ID" --arg key "$key" --arg reveal "$reveal" '{id: $id, key: $key, name: "Drawer", glyph: "\uf141", reveal: $reveal, items: []}')
   apply --arg after "$after" --argjson have "$have_after" --arg s "$section" --arg id "$ID" --argjson e "$entry" '
     (.bar.layout[$s] // []) as $arr
     | ($arr | map(.id == $id and ((.key // "") == $after)) | index(true)) as $i

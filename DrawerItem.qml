@@ -54,6 +54,7 @@ Item {
     Component.onCompleted: root.ensureHostApi()
 
     Component.onDestruction: {
+        if (root.hostApi) root.hostApi.releaseAll()
         var item = root.widgetItem
         if (item) {
             try { if ("bar" in item) item.bar = null } catch (e) { }
