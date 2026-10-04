@@ -1,0 +1,552 @@
+#!/usr/bin/env bash
+# omarchy-drawers: manage hover drawers on the Omarchy bar.
+#
+#   omarchy-drawers               interactive menu
+#   omarchy-drawers new           create a drawer (pick side, name, icon, widgets)
+#   omarchy-drawers edit          rename, change icon, change widgets, delete
+#   omarchy-drawers list          show drawers and what is parked in them
+#   omarchy-drawers delete [key]  put a drawer's widgets back on the bar
+#   omarchy-drawers reorder       move a drawer one slot earlier/later in its section
+#   omarchy-drawers undo          restore the previous shell.json
+#   omarchy-drawers uninstall     put everything back and remove the plugin
+#
+# Used by the right-click editor on the bar (you can call them too):
+#   omarchy-drawers describe  --key K
+#   omarchy-drawers configure --key K --name N --icon G --widgets a,b,c
+#   omarchy-drawers delete    --key K
+#   omarchy-drawers add-blank [--after K] [--section left|center|right]
+#   omarchy-drawers reorder   --key K --before|--after
+#
+# Scriptable form:
+#   omarchy-drawers new --section right --name Media --icon "" --widgets omarchy.audio,omarchy.bluetooth
+#
+# Every change is a single edit of ~/.config/omarchy/shell.json, backed up first.
+set -uo pipefail
+
+ID="io.github.qempexe.omadrawers"
+CFG="${OMARCHY_SHELL_JSON:-$HOME/.config/omarchy/shell.json}"
+PLUGROOT="${OMARCHY_PLUGIN_ROOT:-$HOME/.config/omarchy/plugins}"
+PLUGDIR="$PLUGROOT/$ID"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-drawers"
+BIN="${OMARCHY_DRAWERS_BIN:-$HOME/.local/bin/omarchy-drawers}"
+
+die() { printf 'omarchy-drawers: %s\n' "$*" >&2; exit 1; }
+say() { printf '%s\n' "$*"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+tty_ok() { [[ -t 0 && -t 1 ]]; }
+
+have jq || die "jq is required (it ships with Omarchy)."
+
+read -r -d '' ICONS <<'ICONS_EOF' || true
+  ellipsis
+  ellipsis-vertical
+  menu
+  grid
+  settings
+  tools
+  headphones
+  music
+  wifi
+  bluetooth
+  desktop
+  terminal
+  code
+  heart
+  star
+  bolt
+  shield
+  eye
+  folder
+  gamepad
+  chip
+  plug
+  database
+  cloud
+  chevron-left
+  angle-left
+  double-angle-left
+  mail
+  chat
+  bell
+ICONS_EOF
+
+# ---------------------------------------------------------------- jq helpers
+read -r -d '' DEFS <<'JQ_EOF' || true
+def expand($id; $key):
+  ([ (.bar.layout // {left: .left, center: .center, right: .right})[][] | select(.id == $id and ((.key // "") == $key)) | (.parked // [])[] ]) as $unpark
+  | .bar.layout |= with_entries(.value |= (if type == "array"
+      then map(if (.id == $id and ((.key // "") == $key)) then (.items // [])[] else . end)
+      else . end))
+  | .plugins = ((.plugins // []) | map(select(.id as $i | ($unpark | any(. == $i)) | not)));
+
+def collapse($s; $members; $tpl):
+  (.bar.layout[$s]) as $arr
+  | ($arr | map(select((.id // "") as $i | $members | any(. == $i)))) as $items
+  | ($arr | to_entries | map(select((.value.id // "") as $i | $members | any(. == $i))) | .[0].key) as $pos
+  | ($items | map(.id) | map(select(startswith("omarchy.") | not))) as $third
+  | ((.plugins // []) | map(.id)) as $have
+  | ($third | map(select(. as $t | ($have | any(. == $t)) | not))) as $parked
+  | .bar.layout[$s] = ($arr | to_entries | map(
+        if .key == $pos then ($tpl + {items: $items, parked: $parked})
+        elif ((.value.id // "") as $i | $members | any(. == $i)) then empty
+        else .value end))
+  | .plugins = ((.plugins // []) + ($parked | map({id: .})));
+
+# configure: set name/icon and exactly which widgets sit inside one existing drawer,
+# in place (the drawer keeps its position; widgets move in and out of it).
+def configure($id; $key; $newkey; $name; $glyph; $members):
+  (.bar.layout // {left: .left, center: .center, right: .right}) as $L
+  | ([ $L | to_entries[] | select(.value | type == "array")
+       | select(.value | any(.[]; .id == $id and ((.key // "") == $key))) | .key ] | .[0]) as $s
+  | if $s == null then error("drawer not found") else . end
+  | ($L[$s]) as $arr
+  | ($arr | map(.id == $id and ((.key // "") == $key)) | index(true)) as $di
+  | $arr[$di] as $d
+  | ($d.items // []) as $old
+  | ($d.parked // []) as $oldparked
+  | ($arr | to_entries | map(select(.key != $di) | .value)) as $others
+  | ($members | map(. as $m | (($old + $others) | map(select(.id == $m)) | .[0]) // {id: $m})) as $items
+  | ($members | map(select(startswith("omarchy.") | not))) as $third
+  | ((.plugins // []) | map(.id)) as $have
+  | ($third | map(select(. as $t | ($oldparked | any(. == $t)) or (($have | any(. == $t)) | not)))) as $parked
+  | ($oldparked | map(select(. as $p | ($parked | any(. == $p)) | not))) as $drop
+  | ($old | map(select(.id as $i | ($members | any(. == $i)) | not))) as $back
+  | ({reveal: (if $s == "right" then "before" else "after" end)}
+      + (if ($old | length) > 0 then ($d | del(.items, .parked)) else ($d | del(.items, .parked, .reveal)) end)
+      + {key: $newkey, name: $name, glyph: $glyph, items: $items, parked: $parked}) as $nd
+  | .bar.layout[$s] = ($arr | to_entries | map(
+        if .key == $di then ([$nd] + $back)
+        elif ((.value.id // "") as $i | $members | any(. == $i)) then []
+        else [.value] end) | add)
+  | .plugins = (((.plugins // []) | map(select(.id as $i | ($drop | any(. == $i)) | not)))
+      + ($parked | map(select(. as $p | ($have | any(. == $p)) | not)) | map({id: .})));
+JQ_EOF
+
+reload_shell() {
+  have omarchy-shell || return 0
+  omarchy-shell shell reloadConfig >/dev/null 2>&1 || true
+}
+
+ensure_cfg() {
+  [[ -f $CFG ]] && return 0
+  local src
+  for src in "${OMARCHY_PATH:-/nonexistent}/config/omarchy/shell.json" \
+             /usr/share/omarchy/config/omarchy/shell.json; do
+    if [[ -f $src ]]; then mkdir -p "$(dirname "$CFG")"; cp "$src" "$CFG"; return 0; fi
+  done
+  die "No $CFG yet. Run 'omarchy plugin list' once so Omarchy creates it, then retry."
+}
+
+# apply <jq args...> <program>: edit shell.json atomically, with a backup.
+apply() {
+  ensure_cfg
+  mkdir -p "$STATE/backups"
+  local tmp; tmp=$(mktemp "$STATE/new.XXXXXX")
+  if ! jq "$@" "$CFG" >"$tmp" 2>"$STATE/jq.err" || ! jq -e 'type == "object"' "$tmp" >/dev/null 2>&1; then
+    local why; why=$(head -c 300 "$STATE/jq.err" 2>/dev/null)
+    rm -f "$tmp"
+    die "edit failed, shell.json untouched. ${why}"
+  fi
+  cp -p "$CFG" "$STATE/backups/shell.json.$(date +%Y%m%d-%H%M%S-%N)"
+  cat "$tmp" >"$CFG"   # write through, so a symlinked shell.json stays a symlink
+  rm -f "$tmp"
+  ls -1t "$STATE/backups" 2>/dev/null | tail -n +21 | while read -r old; do rm -f "$STATE/backups/$old"; done
+  reload_shell
+}
+
+layout_ids() { # <section>: widgets that can be parked (real widgets, not drawers/spacers/custom modules)
+  jq -r --arg s "$1" --arg id "$ID" '
+    (.bar.layout[$s] // [])[]
+    | select(.id != $id and .id != "omarchy.spacer" and ((.type // "widget") == "widget"))
+    | .id' "$CFG"
+}
+
+drawer_rows() { # tsv: section key name glyph items
+  jq -r --arg id "$ID" '
+    (.bar.layout // {left: .left, center: .center, right: .right}) | to_entries[] | .key as $s | .value
+    | map(select(.id == $id))[]
+    | [$s, (.key // ""), (.name // "Drawer"), (.glyph // ""), ((.items // []) | map(.id) | join(", "))]
+    | @tsv' "$CFG" 2>/dev/null
+}
+
+slugify() {
+  local s; s=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')
+  printf '%s' "${s:-drawer}"
+}
+
+# ------------------------------------------------------------------ prompts
+ask() { # <header> [default]
+  local out
+  if have gum && tty_ok; then
+    out=$(gum input --header "$1" --value "${2:-}") || return 1
+  else
+    read -r -p "$1 ${2:+[$2] }" out || return 1
+    out=${out:-${2:-}}
+  fi
+  printf '%s' "$out"
+}
+
+pick_one() { # <header> <options...>
+  local header=$1; shift
+  if have gum && tty_ok; then
+    gum choose --header "$header" "$@"
+  else
+    local i=1 o n; for o in "$@"; do printf '  %d) %s\n' "$i" "$o" >&2; i=$((i+1)); done
+    read -r -p "$header " n || return 1
+    [[ $n =~ ^[0-9]+$ ]] && (( n >= 1 && n <= $# )) || return 1
+    printf '%s' "${!n}"
+  fi
+}
+
+pick_many() { # <header> <preselected csv> <options...>
+  local header=$1 pre=$2; shift 2
+  if have gum && tty_ok; then
+    if [[ -n $pre ]]; then gum choose --no-limit --header "$header" --selected "$pre" "$@"
+    else gum choose --no-limit --header "$header (space = toggle, enter = done)" "$@"; fi
+  else
+    local i=1 o; for o in "$@"; do printf '  %d) %s\n' "$i" "$o" >&2; i=$((i+1)); done
+    local picks; read -r -p "$header (numbers, space separated) " picks || return 1
+    local n; for n in $picks; do [[ $n =~ ^[0-9]+$ ]] && (( n >= 1 && n <= $# )) && printf '%s\n' "${!n}"; done
+  fi
+}
+
+pick_icon() {
+  local choice
+  if have gum && tty_ok; then
+    choice=$( { printf '%s\n' "$ICONS"; printf '✎  type or paste my own icon\n'; } | gum filter --header "Pick an icon (type to search)") || return 1
+  else
+    choice=$(printf '%s\n' "$ICONS" | head -n 1)
+  fi
+  if [[ $choice == "✎"* ]]; then ask "Paste an icon or emoji"; else printf '%s' "${choice%%  *}"; fi
+}
+
+# ----------------------------------------------------------------- commands
+cmd_list() {
+  ensure_cfg
+  local rows; rows=$(drawer_rows)
+  [[ -z $rows ]] && { say "No drawers yet. Create one with: omarchy-drawers new"; return 0; }
+  while IFS=$'\t' read -r s key name glyph items; do
+    printf '%s  %s  [%s side, key: %s]\n    %s\n' "$glyph" "$name" "$s" "${key:--}" "${items:-(empty)}"
+  done <<<"$rows"
+}
+
+next_key() { # <base>
+  local base=$1 k=$1 n=2 existing
+  existing=$(jq -r --arg id "$ID" '(.bar.layout // {left: .left, center: .center, right: .right})[][] | select(.id == $id) | (.key // empty)' "$CFG")
+  while grep -qx -- "$k" <<<"$existing"; do k="$base-$n"; n=$((n+1)); done
+  printf '%s' "$k"
+}
+
+cmd_new() {
+  ensure_cfg
+  local section="" name="" glyph="" widgets="" a
+  while (( $# )); do
+    a=$1; shift
+    case $a in
+      --section) section=${1:-}; shift ;;
+      --name)    name=${1:-};    shift ;;
+      --icon)    glyph=${1:-};   shift ;;
+      --widgets) widgets=${1:-}; shift ;;
+      *) die "unknown option: $a" ;;
+    esac
+  done
+
+  local interactive=0
+  [[ -z $section ]] && { interactive=1; section=$(pick_one "Which side of the bar?" right left center) || return 1; }
+  [[ $section =~ ^(left|center|right)$ ]] || die "section must be left, center or right"
+
+  local avail; avail=$(layout_ids "$section")
+  [[ -z $avail ]] && die "no parkable widgets in the $section section"
+
+  [[ -z $name ]] && { name=$(ask "Drawer name" "") || return 1; }
+  [[ -z $name ]] && die "a drawer needs a name"
+  [[ -z $glyph ]] && { glyph=$(pick_icon) || return 1; }
+  [[ -z $glyph ]] && die "a drawer needs an icon"
+
+  local members_json
+  if [[ -z $widgets ]]; then
+    local chosen
+    mapfile -t chosen < <(pick_many "Widgets to park in '$name'" "" $(printf '%s\n' "$avail")) || return 1
+    (( ${#chosen[@]} )) || die "no widgets selected"
+    members_json=$(printf '%s\n' "${chosen[@]}" | jq -R . | jq -sc .)
+  else
+    members_json=$(jq -Rc 'split(",") | map(select(length > 0))' <<<"$widgets")
+  fi
+  local missing
+  missing=$(jq -nr --argjson m "$members_json" --arg a "$avail" '$m[] | select(. as $x | ($a | split("\n") | index($x)) | not)')
+  [[ -n $missing ]] && die "not in the $section section (or not parkable): $(tr '\n' ' ' <<<"$missing")"
+
+  local key reveal tpl
+  key=$(next_key "$(slugify "$name")")
+  [[ $section == right ]] && reveal=before || reveal=after
+  tpl=$(jq -nc --arg id "$ID" --arg key "$key" --arg name "$name" --arg glyph "$glyph" --arg reveal "$reveal" \
+        '{id: $id, key: $key, name: $name, glyph: $glyph, reveal: $reveal}')
+  apply --arg s "$section" --argjson m "$members_json" --argjson tpl "$tpl" "$DEFS collapse(\$s; \$m; \$tpl)"
+  say "Created drawer '$name' ($(jq -r 'length' <<<"$members_json") widgets). Hover its icon on the bar."
+}
+
+pick_drawer() { # prints "section<TAB>key"
+  local rows; rows=$(drawer_rows)
+  [[ -z $rows ]] && die "no drawers yet."
+  local labels=() s key name glyph items
+  while IFS=$'\t' read -r s key name glyph items; do labels+=("$glyph  $name  ($s, ${key:--})"); done <<<"$rows"
+  local choice; choice=$(pick_one "Which drawer?" "${labels[@]}") || return 1
+  local i=0
+  for l in "${labels[@]}"; do
+    if [[ $l == "$choice" ]]; then
+      sed -n "$((i+1))p" <<<"$rows" | cut -f1,2; return 0
+    fi
+    i=$((i+1))
+  done
+  return 1
+}
+
+cmd_describe() { # --key K  ->  one line of JSON describing that drawer (used by the in-bar editor)
+  ensure_cfg
+  local key="" a
+  while (( $# )); do a=$1; shift; case $a in --key) key=${1:-}; shift ;; *) die "unknown option: $a" ;; esac; done
+  local out
+  out=$(jq -c --arg id "$ID" --arg key "$key" '
+    ([ (.bar.layout // {left: .left, center: .center, right: .right}) | to_entries[] | select(.value | type == "array") | .value[] | select(.id == $id) ] | length) as $n
+    | [ (.bar.layout // {left: .left, center: .center, right: .right}) | to_entries[] | select(.value | type == "array")
+      | .key as $s | .value as $arr
+      | ($arr | map(select(.id == $id and ((.key // "") == $key))) | .[0]) as $d
+      | select($d != null)
+      | { section: $s, drawers: $n, key: ($d.key // ""), name: ($d.name // "Drawer"), glyph: ($d.glyph // ""),
+          items: (($d.items // []) | map(.id)),
+          available: ($arr | map(select(.id != $id and .id != "omarchy.spacer" and ((.type // "widget") == "widget")) | .id)) } ]
+    | .[0] // empty' "$CFG") || die "could not read $CFG"
+  [[ -n $out ]] || die "drawer not found (key: ${key:--})"
+  printf '%s\n' "$out"
+}
+
+cmd_configure() { # --key K --name N --icon G --widgets a,b,c  (edits one existing drawer in place)
+  ensure_cfg
+  local key="" name="" glyph="" widgets="" a
+  while (( $# )); do
+    a=$1; shift
+    case $a in
+      --key)     key=${1:-};     shift ;;
+      --name)    name=${1:-};    shift ;;
+      --icon)    glyph=${1:-};   shift ;;
+      --widgets) widgets=${1:-}; shift ;;
+      *) die "unknown option: $a" ;;
+    esac
+  done
+  [[ -z $name ]] && name="Drawer"
+  local desc; desc=$(cmd_describe --key "$key") || return 1
+  [[ -z $glyph ]] && glyph=$(jq -r '.glyph' <<<"$desc")
+  local members_json
+  members_json=$(jq -Rc 'split(",") | map(select(length > 0)) | reduce .[] as $x ([]; if index($x) then . else . + [$x] end)' <<<"$widgets")
+  local missing
+  missing=$(jq -nr --argjson d "$desc" --argjson m "$members_json" '$m[] | select(. as $x | (($d.items + $d.available) | index($x)) | not)')
+  [[ -n $missing ]] && die "not in this drawer's section (or not parkable): $(tr '\n' ' ' <<<"$missing")"
+  local newkey=$key
+  [[ -z $newkey ]] && newkey=$(next_key "$(slugify "$name")")
+  apply --arg id "$ID" --arg key "$key" --arg newkey "$newkey" --arg name "$name" --arg glyph "$glyph" \
+        --argjson m "$members_json" "$DEFS configure(\$id; \$key; \$newkey; \$name; \$glyph; \$m)"
+  say "Saved drawer '$name' ($(jq -r 'length' <<<"$members_json") widgets)."
+}
+
+cmd_add() { # [--section S] [--after KEY]: put a new blank drawer on the bar (right next to KEY if given)
+  ensure_cfg
+  local section="" after="" have_after=0 a
+  while (( $# )); do
+    a=$1; shift
+    case $a in
+      --section) section=${1:-}; shift ;;
+      --after)   after=${1:-}; have_after=1; shift ;;
+      *) die "unknown option: $a" ;;
+    esac
+  done
+  if (( have_after )); then
+    section=$(cmd_describe --key "$after" | jq -r '.section') || return 1
+  fi
+  [[ -z $section ]] && section=right
+  [[ $section =~ ^(left|center|right)$ ]] || die "section must be left, center or right"
+  local key entry
+  key=$(next_key "drawer")
+  entry=$(jq -nc --arg id "$ID" --arg key "$key" '{id: $id, key: $key, name: "Drawer", glyph: "\uf141", items: []}')
+  apply --arg after "$after" --argjson have "$have_after" --arg s "$section" --arg id "$ID" --argjson e "$entry" '
+    (.bar.layout[$s] // []) as $arr
+    | ($arr | map(.id == $id and ((.key // "") == $after)) | index(true)) as $i
+    | .bar.layout[$s] = (if $have == 1 and $i != null then $arr[:$i+1] + [$e] + $arr[$i+1:] else $arr + [$e] end)'
+  say "Added a new blank drawer ($key) to the $section side. Right-click it to set it up."
+}
+
+cmd_reorder() { # --key K --before|--after: move this exact drawer one slot in its section
+  ensure_cfg
+  local key="" direction="" a
+  while (( $# )); do
+    a=$1; shift
+    case $a in
+      --key)    key=${1:-};      shift ;;
+      --before) direction="before"; shift ;;
+      --after)  direction="after";  shift ;;
+      *) die "unknown option: $a" ;;
+    esac
+  done
+  [[ -n $key ]] || die "reorder: --key is required"
+  [[ -n $direction ]] || die "reorder: --before or --after is required"
+
+  # Locate the exact drawer (matched by key, not just by id) and its neighbours.
+  local section index count
+  read -r section index count < <(jq -r --arg id "$ID" --arg key "$key" '
+    (.bar.layout // {left: .left, center: .center, right: .right}) as $L
+    | $L
+    | to_entries[]
+    | select(.value | type == "array")
+    | .key as $s
+    | (.value | length) as $n
+    | .value
+    | to_entries[]
+    | select(.value.id == $id and ((.value.key // "") == $key))
+    | "\($s) \(.key) \($n)"' "$CFG")
+
+  [[ -n $section ]] || die "reorder: drawer not found (key: $key)"
+
+  local target
+  if [[ $direction == "before" ]]; then
+    (( index > 0 )) || { say "Already first in the $section section."; return 0; }
+    target=$((index - 1))
+  else
+    (( index < count - 1 )) || { say "Already last in the $section section."; return 0; }
+    target=$((index + 1))
+  fi
+
+  # Swap the drawer with its adjacent neighbour. Uses the read-with-fallback
+  # layout so it works whether the file keeps sections at top level or under
+  # `.bar.layout`, and writes back to `.bar.layout` (creating it if absent),
+  # which is the schema the shell reads from.
+  apply --arg s "$section" --argjson i "$index" --argjson t "$target" '
+    (.bar.layout // {left: .left, center: .center, right: .right}) as $L
+    | ($L[$s]) as $arr
+    | .bar.layout //= $L
+    | .bar.layout[$s] = (
+        if $i < $t then
+          $arr[0:$i] + [$arr[$t]] + [$arr[$i]] + $arr[$t+1:]
+        else
+          $arr[0:$t] + [$arr[$i]] + [$arr[$t]] + $arr[$i+1:]
+        end
+      )'
+
+  say "Moved drawer '$key' $direction."
+}
+
+cmd_delete() {
+  ensure_cfg
+  local key="" have_key=0 force=0
+  while (( $# )); do
+    case $1 in
+      --key)   key=${2:-}; have_key=1; shift; (( $# )) && shift ;;
+      --force) force=1; shift ;;
+      *)       key=$1; have_key=1; shift ;;
+    esac
+  done
+  if (( ! have_key )); then local sel; sel=$(pick_drawer) || return 1; key=$(cut -f2 <<<"$sel"); fi
+  local desc; desc=$(cmd_describe --key "$key") || return 1
+  if (( ! force )) && (( $(jq -r '.drawers' <<<"$desc") <= 1 )); then
+    die "this is your only drawer, so it is kept (add another first, or use --force)"
+  fi
+  apply --arg id "$ID" --arg key "$key" "$DEFS expand(\$id; \$key)"
+  say "Drawer removed; its widgets are back on the bar."
+}
+
+cmd_edit() {
+  ensure_cfg
+  local sel section key; sel=$(pick_drawer) || return 1
+  section=$(cut -f1 <<<"$sel"); key=$(cut -f2 <<<"$sel")
+  local cur_name cur_glyph
+  cur_name=$(jq -r --arg id "$ID" --arg key "$key" '[(.bar.layout // {left: .left, center: .center, right: .right})[][] | select(.id == $id and ((.key // "") == $key))][0].name // "Drawer"' "$CFG")
+  cur_glyph=$(jq -r --arg id "$ID" --arg key "$key" '[(.bar.layout // {left: .left, center: .center, right: .right})[][] | select(.id == $id and ((.key // "") == $key))][0].glyph // ""' "$CFG")
+
+  local action; action=$(pick_one "What do you want to change?" "Rename / change icon" "Change widgets" "Delete drawer") || return 1
+  case $action in
+    "Rename / change icon")
+      local name glyph
+      name=$(ask "Drawer name" "$cur_name") || return 1
+      glyph=$(pick_icon) || return 1
+      apply --arg id "$ID" --arg key "$key" --arg name "${name:-$cur_name}" --arg glyph "${glyph:-$cur_glyph}" \
+        '(.bar.layout[][] | select(.id == $id and ((.key // "") == $key))) |= (.name = $name | .glyph = $glyph)'
+      say "Updated." ;;
+    "Change widgets")
+      local avail own pre chosen
+      avail=$(jq -r --arg s "$section" --arg id "$ID" --arg key "$key" '
+        (.bar.layout[$s] // [])
+        | map(if (.id == $id and ((.key // "") == $key)) then (.items // [])[] else . end)[]
+        | select(.id != $id and .id != "omarchy.spacer" and ((.type // "widget") == "widget")) | .id' "$CFG")
+      own=$(jq -r --arg id "$ID" --arg key "$key" '[(.bar.layout // {left: .left, center: .center, right: .right})[][] | select(.id == $id and ((.key // "") == $key))][0] | (.items // []) | map(.id) | join(",")' "$CFG")
+      mapfile -t chosen < <(pick_many "Widgets in '$cur_name'" "$own" $(printf '%s\n' "$avail")) || return 1
+      local members_json tpl reveal
+      if (( ${#chosen[@]} == 0 )); then
+        apply --arg id "$ID" --arg key "$key" "$DEFS expand(\$id; \$key)"
+        say "No widgets selected: drawer removed."; return 0
+      fi
+      members_json=$(printf '%s\n' "${chosen[@]}" | jq -R . | jq -sc .)
+      reveal=$(jq -r --arg id "$ID" --arg key "$key" '[(.bar.layout // {left: .left, center: .center, right: .right})[][] | select(.id == $id and ((.key // "") == $key))][0].reveal // "after"' "$CFG")
+      tpl=$(jq -nc --arg id "$ID" --arg key "$key" --arg name "$cur_name" --arg glyph "$cur_glyph" --arg reveal "$reveal" \
+            '{id: $id, key: $key, name: $name, glyph: $glyph, reveal: $reveal}')
+      apply --arg id "$ID" --arg key "$key" --arg s "$section" --argjson m "$members_json" --argjson tpl "$tpl" \
+        "$DEFS expand(\$id; \$key) | collapse(\$s; \$m; \$tpl)"
+      say "Updated." ;;
+    "Delete drawer") cmd_delete --key "$key" ;;
+  esac
+}
+
+cmd_undo() {
+  local last; last=$(ls -1t "$STATE/backups" 2>/dev/null | head -n 1)
+  [[ -z $last ]] && die "no backup to restore."
+  mkdir -p "$STATE/backups"
+  cp -p "$CFG" "$STATE/backups/shell.json.$(date +%Y%m%d-%H%M%S-%N)"
+  cat "$STATE/backups/$last" >"$CFG"
+  rm -f "$STATE/backups/$last"
+  reload_shell
+  say "Restored the previous shell.json."
+}
+
+cmd_uninstall() {
+  if [[ -f $CFG ]]; then
+    apply --arg id "$ID" '
+      ([ (.bar.layout // {left: .left, center: .center, right: .right})[][] | select(.id == $id) | (.parked // [])[] ]) as $unpark
+      | .bar.layout |= with_entries(.value |= (if type == "array"
+          then map(if .id == $id then (.items // [])[] else . end) else . end))
+      | .plugins = ((.plugins // []) | map(select(.id != $id and (.id as $i | ($unpark | any(. == $i)) | not))))'
+  fi
+  if have omarchy; then omarchy plugin remove "$ID" --yes >/dev/null 2>&1 || true; fi
+  rm -rf "$PLUGDIR"
+  have omarchy-shell && omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+  rm -rf "$STATE"
+  say "Omadrawers removed. Every parked widget is back on your bar."
+  rm -f "$BIN"
+}
+
+cmd_menu() {
+  local a; a=$(pick_one "Omadrawers" "New drawer" "Edit a drawer" "List drawers" "Undo last change" "Quit") || return 0
+  case $a in
+    "New drawer") cmd_new ;;
+    "Edit a drawer") cmd_edit ;;
+    "List drawers") cmd_list ;;
+    "Undo last change") cmd_undo ;;
+  esac
+}
+
+main() {
+  local c=${1:-menu}; shift || true
+  case $c in
+    menu) cmd_menu ;;
+    new|add) cmd_new "$@" ;;
+    edit) cmd_edit ;;
+    describe) cmd_describe "$@" ;;
+    add-blank) cmd_add "$@" ;;
+    configure) cmd_configure "$@" ;;
+    reorder) cmd_reorder "$@" ;;
+    list|ls) cmd_list ;;
+    delete|rm) cmd_delete "$@" ;;
+    undo) cmd_undo ;;
+    uninstall|remove) cmd_uninstall ;;
+    -h|--help|help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown command: $c (try: omarchy-drawers help)" ;;
+  esac
+}
+main "$@"
+exit $?

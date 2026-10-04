@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.qempexe.omadrawers",
+  "name": "Omadrawers",
+  "version": "0.1.0",
+  "author": "qempexe",
+  "license": "MIT",
+  "description": "Hover drawers for the Omarchy bar: right-click the icon to name it, pick an icon and choose which bar widgets hide inside. Unlimited drawers. Please read the github README.md first!",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Drawer",
+    "description": "A bar icon that expands to show the widgets parked inside it",
+    "category": "Layout",
+    "allowMultiple": true,
+    "defaultSection": "right",
+    "defaults": {
+      "name": "Drawer",
+      "glyph": "",
+      "items": []
+    },
+    "schema": [
+      {
+        "key": "name",
+        "type": "string",
+        "label": "Name"
+      },
+      {
+        "key": "glyph",
+        "type": "string",
+        "label": "Icon"
+      }
+    ]
+  }
+}
