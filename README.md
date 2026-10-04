@@ -32,7 +32,7 @@ Add **Omadrawer** to the bar from the widget list (you can add as many as you li
 - **Hover** the icon to slide the drawer open; **left-click** pins it open.
 - Drag the rows under **Order inside the drawer** to reorder the hidden widgets, then Save.
 - **+ New drawer** adds another blank drawer next to this one. Right-click the new one to set it up.
-- **◀ ▶** (top right of the editor) moves that drawer one slot along the bar.
+- **◀ ▶** move that drawer one slot along the bar.
 - **Empty** puts all of a drawer's widgets back on the bar and keeps the blank drawer.
   **Remove** deletes a blank drawer. Your last drawer can be emptied but never removed.
 - Only widgets in the same bar section as the drawer can be hidden in it.
