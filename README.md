@@ -49,9 +49,6 @@ widgets, the shell can drop that drawer together with the widgets inside it. Do 
 4. Now disable or remove the plugin (Super + Space menu, or `omarchy plugin remove io.github.qempexe.omadrawers`).
 5. If an empty Drawer entry is still on your bar afterwards, delete it in the bar settings.
 
-Shortcut for steps 2 and 3: run `omarchy-drawers flatten`. It puts every hidden widget back on the
-bar and removes all drawers in one go.
-
 Enabling the plugin again gives you a fresh start: add **Drawer** from the widget list and set it up.
 Names, icons and contents are not remembered across a disable.
 
@@ -66,7 +63,6 @@ omarchy-drawers edit       # rename, change icon/widgets, delete
 omarchy-drawers list
 omarchy-drawers add-blank  # add another blank drawer (then right-click it)
 omarchy-drawers reorder --key KEY --before|--after
-omarchy-drawers flatten    # every widget back on the bar, all drawers removed
 omarchy-drawers undo       # restore the previous shell.json
 ```
 
