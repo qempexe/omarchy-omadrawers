@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "."
 
 Panel {
     id: root
@@ -202,8 +203,12 @@ Panel {
             Qt.callLater(function() {
                 root.dBusy = false
                 if (exitCode === 0) {
-                    var svc = root.bar && root.bar.shell
-                        ? root.bar.shell.serviceFor(root.moduleName) : null
+                    // Replacement bars hand this widget a service-less shell.
+                    // Prefer the instance published by Service.qml, then fall
+                    // back to the host lookup used by the stock bar.
+                    var svc = Bridge.service
+                        || (root.bar && root.bar.shell
+                            ? root.bar.shell.serviceFor(root.moduleName) : null)
                     if (svc && typeof svc.notifyDrawerSettings === "function") {
                         var base = root.hostWidget && root.hostWidget.settings
                             ? root.hostWidget.settings : ({})

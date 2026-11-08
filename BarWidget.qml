@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import "."
 
 Item {
     id: root
@@ -77,6 +78,10 @@ Item {
     property int serviceAttempt: 0
     readonly property var service: {
         var attempt = root.serviceAttempt
+        // Replacement bars give a bar entry a service-less shell, so ask the
+        // plugin's own Service.qml (published through Bridge) first.
+        var bridged = Bridge.service
+        if (bridged) return bridged
         return root.bar && root.bar.shell ? root.bar.shell.serviceFor(root.pluginId) : null
     }
 
