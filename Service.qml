@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell.Io
+import "."
 
 Item {
     id: root
@@ -12,6 +13,12 @@ Item {
     property var barWidgetRegistry: null
 
     readonly property string pluginId: "io.github.qempexe.omadrawers"
+
+    // Publish this instance for BarWidget.qml. Replacement bars hand a bar
+    // entry a service-less shell, so the widget cannot find its own service
+    // through bar.shell.serviceFor(); this singleton bridges the gap.
+    Component.onCompleted: Bridge.service = root
+    Component.onDestruction: if (Bridge.service === root) Bridge.service = null
     readonly property var widgetCatalog: root.barWidgetRegistry && root.barWidgetRegistry.widgets
         ? root.barWidgetRegistry.widgets : ({})
 
